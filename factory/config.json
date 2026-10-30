@@ -22,7 +22,7 @@
     "waiting": "lsf:waiting-dependency",
     "hold": "lsf:hold"
   },
-  "workerMode": "medium",
+  "worker": { "model": "openai/gpt-6.1-sol", "reasoningEffort": "high" },
   "limits": { "plan": 2, "build": 4, "test": 6, "integrate": 1, "resolve": 2, "total": 10 },
   "timing": {
     "staleAfterIdleMs": 180000,

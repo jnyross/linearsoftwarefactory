@@ -1,3 +1,4 @@
+// @amp-agent-mode {"key":"lsf-worker","label":"lsf-worker"}
 // Linear Software Factory controller plugin.
 // Registers the lsf_tick tool only in the controller thread's orb. Linear is read and
 // written through the thread's Linear MCP connection; workers are built-in-mode orb
@@ -100,11 +101,31 @@ async function saveLedger(ledger: Ledger) {
 	await rename(tmp, LEDGER)
 }
 
+const WORKER_INSTRUCTIONS =
+	'You are a Linear Software Factory worker. Follow the job message exactly: it names your role, the Linear transitions you own, your standing authority, and the failure protocol. Never ask questions or wait for a human. Do not create threads, open pull requests, or change Amp, billing, or model settings.'
+
 export default function (amp: PluginAPI) {
+	// Plugin agents spawned from a tool must be registered custom modes to run in orbs.
+	// The model is pinned to an OpenAI model served by John's ChatGPT subscription, with no
+	// premium serving features, because custom modes do not follow the Tune Modes preset.
+	const worker = amp.createAgent({
+		extends: 'medium',
+		model: config.worker.model as `${string}/${string}`,
+		reasoningEffort: config.worker.reasoningEffort as 'high',
+		instructions: WORKER_INSTRUCTIONS,
+		tools: 'all',
+		features: [],
+		display: { label: 'lsf-worker', color: '#26B5CE' },
+	})
+	amp.registerAgentMode({
+		key: 'lsf-worker',
+		label: 'lsf-worker',
+		description: 'Linear Software Factory worker (planner, builder, tester, integrator, resolver). Dispatched by the factory controller; not for manual use.',
+		agent: worker.definition,
+	})
+
 	const controllerThreadId = config.controllerThreadId
 	if (!controllerThreadId || process.env.AMP_THREAD_ID !== controllerThreadId) return
-
-	const worker = amp.getBuiltinAgent(config.workerMode as 'medium')
 	const handles = new Map<string, PluginThread>()
 	const handle = (id: string) => handles.get(id) ?? amp.threads.get(id as `T-${string}`)
 	let running: Promise<string> | null = null

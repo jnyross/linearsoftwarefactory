@@ -71,7 +71,7 @@ Stall detection: a worker that is idle while Linear still shows its stage in pro
 
 ## Safeguards
 
-- Workers run in the built-in `medium` mode, which follows the account's ChatGPT-only routing preset, and are created with no extra features (no `fast` or `plaid`). Nothing changes billing or model settings.
+- Workers run in the plugin's `lsf-worker` mode: the `medium` prompt and tools with the model pinned to `openai/gpt-6.1-sol` (high effort), served by John's ChatGPT subscription, and no extra features (no `fast` or `plaid`). Amp requires a registered custom mode for orb threads spawned from a plugin tool, and custom modes do not follow the Tune Modes preset, so the pin lives in `factory/config.json`. Nothing changes billing or model settings.
 - No pull requests; only the integrator pushes `main`, and never with force. Builders push only their branch; testers push nothing.
 - Tests are never weakened to get a pass, and unverified work is never marked Done.
 
