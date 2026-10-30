@@ -27,10 +27,10 @@ Linear webhooks are not used: polling once a minute was accepted, and an Amp plu
 | --- | --- |
 | **Backlog**, no parent, not `lsf:build`/`lsf:test` | Idea intake. The controller labels it `lsf:idea`, moves it to **In Progress**, and dispatches a planner. |
 | `lsf:idea` + `lsf:planned`, **In Progress** | Planned idea; moves to **Done** when all its `lsf:build` sub-issues are closed. |
-| `lsf:build` sub-issue of an idea, **Todo** | Ready to build once its parent is planned and all `blockedBy` issues are closed. |
+| `lsf:build` sub-issue of an idea, **Todo** (or **Backlog**) | Ready to build once its parent is planned and all `blockedBy` issues are closed. |
 | `lsf:build`, **In Progress** | One builder agent owns it on branch `lsf/<issue>`. |
-| `lsf:build`, **In Review** | Built; its `lsf:test` sub-issues run, one tester agent per test issue. |
-| `lsf:build`, **In Review** + `lsf:integrating` | The single integrator is merging it into `main`. |
+| `lsf:build`, **In Progress** + `lsf:built` | Built; its `lsf:test` sub-issues run, one tester agent per test issue. |
+| `lsf:build`, **In Progress** + `lsf:built` + `lsf:integrating` | The single integrator is merging it into `main`. |
 | `lsf:build`, **Done** | Integrated into `main`. |
 | `lsf:test` sub-issue of a build, **Todo** / **In Progress** / **Done** | Waiting / tester running / passed. Failures go back to the build. |
 | `lsf:repair` | A build was sent back to its builder after a failure. |
@@ -38,13 +38,14 @@ Linear webhooks are not used: polling once a minute was accepted, and an Amp plu
 | `lsf:waiting-dependency` | Waiting on dependency or cooling down; retried automatically after backoff. |
 | `lsf:hold` | Opt-out: the factory ignores the issue. |
 | **Triage**, **Canceled**, **Duplicate** | Not touched by the factory (Canceled and Duplicate count as closed for dependencies). |
+| **In Review** | Not used. A pre-existing Linear agent automation in LOO runs a QA check whenever an issue enters In Review and returns it to Backlog, so the factory tracks "built, awaiting tests" with the `lsf:built` label instead. Sub-issues bounced to Backlog are picked up again. |
 
 Every dispatch writes an `<!-- lsf-dispatch {...} -->` comment with the worker thread link. Every failure writes an `<!-- lsf-failure {"stage","kind","signature"} -->` comment with evidence.
 
 ## Pipeline
 
 1. **Plan**: the planner creates build sub-issues (acceptance criteria, dependencies as `blockedBy`) and one to three test sub-issues per build, then adds `lsf:planned`.
-2. **Build**: independent builds run in parallel (limit 4), one builder per issue. The builder pushes `lsf/<issue>` and moves the issue to In Review.
+2. **Build**: independent builds run in parallel (limit 4), one builder per issue. The builder pushes `lsf/<issue>` and adds `lsf:built`.
 3. **Test**: one tester per test sub-issue (limit 6) tests the branch merged with the latest `origin/main`. Pass: test Done. Fail: Resolution Needed on the build.
 4. **Integrate**: one integrator at a time merges the branch into the latest `origin/main`, resolves conflicts, runs `bun test` on the combined result, and pushes `main`; non-fast-forward pushes are refetched, retested, and retried.
 5. **Close**: the idea moves to Done when its builds are closed.
