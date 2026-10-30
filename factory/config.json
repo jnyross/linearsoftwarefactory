@@ -7,7 +7,6 @@
     "intake": "Backlog",
     "ready": "Todo",
     "active": "In Progress",
-    "review": "In Review",
     "done": "Done",
     "canceled": "Canceled"
   },
@@ -15,6 +14,7 @@
     "idea": "lsf:idea",
     "planned": "lsf:planned",
     "build": "lsf:build",
+    "built": "lsf:built",
     "test": "lsf:test",
     "repair": "lsf:repair",
     "integrating": "lsf:integrating",

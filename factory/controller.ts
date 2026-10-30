@@ -94,7 +94,7 @@ async function collect(ports: Ports, cfg: Config, ledger: Ledger, now: number): 
 	const S = cfg.statuses
 	const L = cfg.labels
 	const issues: Record<string, Issue> = {}
-	for (const state of [S.intake, S.ready, S.active, S.review]) {
+	for (const state of [S.intake, S.ready, S.active]) {
 		for (const i of await linear.listByState(state)) issues[i.id] = i
 	}
 	const children: Record<string, string[]> = {}
