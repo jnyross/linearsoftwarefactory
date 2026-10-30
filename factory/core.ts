@@ -433,12 +433,12 @@ function applyRoute(ctx: Ctx, issue: Issue, stage: Stage, route: Exclude<RouteNa
 
 	if (route === 'resolve' || route === 'resolve-replan') {
 		if (!capacity(ctx, 'resolve') || ctx.exclusiveUnits.has(unit)) return false
-		const attempt = (ctx.ledger.attempts[`resolve:${issue.id}`] ?? 0) + 1
+		const attempt = nextAttempt(ctx.ledger, 'resolve', issue.id)
 		const job: Job = { key: jobKey('resolve', issue.id, attempt), role: 'resolve', issueId: issue.id, attempt, phase: 'claimed', createdAt: ctx.snap.now, directive }
 		occupy(ctx, job)
 		ctx.steps.push({
 			action: { type: 'dispatch', job, patch: { addLabels: [cfg.labels.resolution], removeLabels: [cfg.labels.waiting] }, resetTests: [], cancelJobs: failureJobsToCancel(ctx, unit) },
-			commit: (l) => { l.attempts[`resolve:${issue.id}`] = attempt; extraCommit?.(l) },
+			commit: (l) => extraCommit?.(l),
 			note: `${route} ${issue.id}: resolver attempt ${attempt}`,
 		})
 		return true
@@ -565,16 +565,19 @@ function parked(ctx: Ctx, issue: Issue) {
 	return has(issue, labels.hold) || has(issue, labels.resolution) || has(issue, labels.waiting)
 }
 
+/** Next attempt number; history covers ledgers written before attempts were recorded at claim time. */
+export function nextAttempt(ledger: Ledger, role: Role, issueId: string) {
+	let max = ledger.attempts[`${role}:${issueId}`] ?? 0
+	for (const h of ledger.history) if (h.role === role && h.issueId === issueId) max = Math.max(max, Number(h.key.split(':').at(-1)) || 0)
+	return max + 1
+}
+
 function dispatch(ctx: Ctx, role: Role, issue: Issue, patch: Patch, extra: Partial<Pick<Extract<Action, { type: 'dispatch' }>, 'resetTests' | 'cancelJobs'>> = {}) {
-	const attempt = (ctx.ledger.attempts[`${role}:${issue.id}`] ?? 0) + 1
+	const attempt = nextAttempt(ctx.ledger, role, issue.id)
 	const directive = ctx.ledger.directives[`${role}:${issue.id}`]
 	const job: Job = { key: jobKey(role, issue.id, attempt), role, issueId: issue.id, attempt, phase: 'claimed', createdAt: ctx.snap.now, directive }
 	occupy(ctx, job)
-	ctx.steps.push({
-		action: { type: 'dispatch', job, patch, resetTests: extra.resetTests ?? [], cancelJobs: extra.cancelJobs ?? [] },
-		commit: (l) => { l.attempts[`${role}:${issue.id}`] = attempt; delete l.directives[`${role}:${issue.id}`] },
-		note: `dispatch ${job.key}`,
-	})
+	ctx.steps.push({ action: { type: 'dispatch', job, patch, resetTests: extra.resetTests ?? [], cancelJobs: extra.cancelJobs ?? [] }, note: `dispatch ${job.key}` })
 }
 
 function dispatchWork(ctx: Ctx) {

@@ -174,7 +174,12 @@ async function perform(ports: Ports, cfg: Config, ledger: Ledger, snap: Snapshot
 		case 'dispatch': {
 			for (const key of action.cancelJobs) await supersede(ports, ledger, key)
 			for (const t of action.resetTests) await linear.update(t, { state: cfg.statuses.ready })
+			// Claim before any I/O: the attempt number and consumed directive persist even if
+			// the rest of the dispatch fails and is finished later by resume-dispatch.
+			const { role, issueId, attempt } = action.job
 			ledger.jobs[action.job.key] = { ...action.job }
+			ledger.attempts[`${role}:${issueId}`] = Math.max(ledger.attempts[`${role}:${issueId}`] ?? 0, attempt)
+			delete ledger.directives[`${role}:${issueId}`]
 			await ports.store.save(ledger)
 			await linear.update(action.job.issueId, action.patch)
 			await advanceDispatch(ports, cfg, ledger, snap, action.job.key)

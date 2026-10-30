@@ -355,6 +355,8 @@ describe('controller tick', () => {
 		expect(w.createdThreads).toBe(1)
 		expect(jobsNow(w)).toEqual([`build:${b}:1`])
 		expect(w.get(b).comments.filter((c) => c.body.includes('lsf-dispatch')).length).toBe(1)
+		// the attempt recorded at claim time survives the failed first try
+		expect(w.ledger!.attempts[`build:${b}`]).toBe(1)
 	})
 
 	test('a lost ledger adopts a live worker instead of starting a duplicate', async () => {
