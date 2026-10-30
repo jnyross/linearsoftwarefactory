@@ -26,19 +26,20 @@ Linear webhooks are not used: polling once a minute was accepted, and an Amp plu
 | Linear | Meaning |
 | --- | --- |
 | **Backlog**, no parent, not `lsf:build`/`lsf:test` | Idea intake. The controller labels it `lsf:idea`, moves it to **In Progress**, and dispatches a planner. |
-| `lsf:idea` + `lsf:planned`, **In Progress** | Planned idea; moves to **Done** when all its `lsf:build` sub-issues are closed. |
+| `lsf:idea` + `lsf:planned`, **In Progress** | Planned idea; moves to **Done** with `lsf:delivered` when all its `lsf:build` sub-issues are closed. |
 | `lsf:build` sub-issue of an idea, **Todo** (or **Backlog**) | Ready to build once its parent is planned and all `blockedBy` issues are closed. |
 | `lsf:build`, **In Progress** | One builder agent owns it on branch `lsf/<issue>`. |
 | `lsf:build`, **In Progress** + `lsf:built` | Built; its `lsf:test` sub-issues run, one tester agent per test issue. |
 | `lsf:build`, **In Progress** + `lsf:built` + `lsf:integrating` | The single integrator is merging it into `main`. |
-| `lsf:build`, **Done** | Integrated into `main`. |
-| `lsf:test` sub-issue of a build, **Todo** / **In Progress** / **Done** | Waiting / tester running / passed. Failures go back to the build. |
+| `lsf:build` + `lsf:integrated` (normally **Done**) | Integrated into `main`. |
+| `lsf:test` sub-issue of a build, **Todo** / **In Progress** / **Done** + `lsf:passed` | Waiting / tester running / passed. Failures go back to the build. |
 | `lsf:repair` | A build was sent back to its builder after a failure. |
 | `lsf:resolution-needed` | Resolution Needed: the latest `lsf-failure` comment holds evidence; the controller routes it. |
 | `lsf:waiting-dependency` | Waiting on dependency or cooling down; retried automatically after backoff. |
 | `lsf:hold` | Opt-out: the factory ignores the issue. |
 | **Triage**, **Canceled**, **Duplicate** | Not touched by the factory (Canceled and Duplicate count as closed for dependencies). |
-| **In Review** | Not used. A pre-existing Linear agent automation in LOO runs a QA check whenever an issue enters In Review and returns it to Backlog, so the factory tracks "built, awaiting tests" with the `lsf:built` label instead. Sub-issues bounced to Backlog are picked up again. |
+| Completion labels | `lsf:integrated`, `lsf:passed`, and `lsf:delivered` are the factory's record of finished work. The pre-existing Linear Loops in LOO move issues out of **Done** back to **Backlog**; the factory does not redo labelled work. |
+| **In Review** | Not used. A pre-existing Linear Loop (Linear Agent automation) in LOO runs a QA check whenever an issue enters In Review and returns it to Backlog, so the factory tracks "built, awaiting tests" with the `lsf:built` label instead. Sub-issues bounced to Backlog are picked up again. |
 
 Every dispatch writes an `<!-- lsf-dispatch {...} -->` comment with the worker thread link. Every failure writes an `<!-- lsf-failure {"stage","kind","signature"} -->` comment with evidence.
 

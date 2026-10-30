@@ -18,6 +18,7 @@ You are an autonomous worker in the Linear Software Factory for the GitHub repos
 - Never weaken, skip, or delete tests to get a pass; never fake success; never mark unverified work Done; never force-push main; never bypass platform permissions, security controls, or the subscription-only model safeguards; never change billing, model-provider, or Amp settings.
 - Do not open pull requests. Do not create other Amp threads or subagents. Do not archive any thread.
 - Use Linear through the \`linear\` MCP module with code_exec (functions such as get_issue, list_issues, list_comments, save_issue, save_comment). Read the issue, its parent, its sub-issues, and its comments before starting.
+- Labels are the factory's record: another Linear automation in this team may move issues between statuses. Never treat an issue labelled \`${L.integrated}\` or \`${L.passed}\` as unfinished work because of its status.
 - Repository rules live in AGENTS.md. The full suite is \`bun test\` at the repository root. Do not modify factory/ or .amp/ unless your issue explicitly targets the factory itself.
 
 ## Failure protocol
@@ -85,7 +86,7 @@ You own test issue ${issue.id}; the controller already moved it to ${S.active}. 
 1. \`git fetch origin\` and check out \`origin/${branch}\` in a local branch, then merge the latest origin/main into it locally to test the combined result. Do not push anything.
 2. Perform exactly the verification described in ${issue.id}, then run \`bun test\`. Check every expected result; a run that only proves nothing crashed is not a pass.
 3. Before recording the result, confirm ${issue.parentId} is still ${S.active} with label \`${L.built}\` and \`origin/${branch}\` still points at the commit you tested. If either changed, comment that your result is stale, move ${issue.id} to ${S.ready}, and stop.
-4. Pass: comment on ${issue.id} with the commit tested, the commands, and the decisive output, then move ${issue.id} to ${S.done}.
+4. Pass: comment on ${issue.id} with the commit tested, the commands, and the decisive output, then add label \`${L.passed}\` and move ${issue.id} to ${S.done}.
 5. Fail: post the failure protocol comment on the build issue ${issue.parentId} with stage \`test\` and kind \`test-failure\` (or setup/dependency), including the reproduction; add \`${L.resolution}\` to ${issue.parentId}, remove \`${L.built}\` from ${issue.parentId} and move it to ${S.ready}, and move ${issue.id} to ${S.ready}.`
 			break
 		case 'integrate':
@@ -97,7 +98,7 @@ You are the only integrator running; the controller added \`${L.integrating}\` t
 2. Resolve every conflict yourself, including substantive ones: preserve the acceptance criteria of ${issue.id} and the behaviour already on main (read the Done lsf:build issues that touched the same files). Add or update tests so both intents are covered.
 3. Run \`bun test\` on the combined result. Fix combined-only failures on the merge when the fix is clear and within ${issue.id}'s scope.
 4. \`git push origin HEAD:main\`. If the push is rejected because main moved, fetch, merge origin/main again, rerun \`bun test\`, and push again (up to five times). Never force-push.
-5. Success: comment on ${issue.id} with the main commit SHA and the suite output, remove \`${L.integrating}\` and \`${L.repair}\`, move ${issue.id} to ${S.done}, and delete the remote branch with \`git push origin --delete ${branch}\`.
+5. Success: comment on ${issue.id} with the main commit SHA and the suite output, add \`${L.integrated}\`, remove \`${L.integrating}\` and \`${L.repair}\`, move ${issue.id} to ${S.done}, and delete the remote branch with \`git push origin --delete ${branch}\`.
 
 On failure: failure protocol on ${issue.id} with stage \`integrate\` (kind conflict, combined-test-failure, push-rejected, or dependency), remove \`${L.integrating}\`, and leave ${issue.id} in ${S.active} with \`${L.built}\`.`
 			break
@@ -110,7 +111,7 @@ ${issue.id} carries \`${L.resolution}\`. You are the only agent changing this wo
 2. Diagnose the root cause. Then act: fix the code on \`${branch}\` (push the branch only), fix repository setup or test tooling on main through a normal commit with a passing \`bun test\` (no force-push), clarify the requirements by editing the issue description with an "Assumptions" section, or split the work into new lsf:build issues with test sub-issues.
 3. Post a comment starting with \`<!-- lsf-resolution {"route":"<what you did>"} -->\` that documents the diagnosis, the assumptions, and the change.
 4. Resume the stage, then remove \`${L.resolution}\` from ${issue.id}:
-   - build or test failure fixed on the branch: keep the build issue in ${S.active} with \`${L.built}\` and move all of its \`${L.test}\` sub-issues to ${S.ready} so they rerun;
+   - build or test failure fixed on the branch: keep the build issue in ${S.active} with \`${L.built}\` and move all of its \`${L.test}\` sub-issues to ${S.ready} without \`${L.passed}\` so they rerun;
    - build needs rebuilding: move the build issue to ${S.ready} with \`${L.repair}\` and without \`${L.built}\`;
    - integration problem: leave the build issue in ${S.active} with \`${L.built}\` and without \`${L.integrating}\`;
    - planning problem: make sure the idea has build issues and \`${L.planned}\`;

@@ -163,6 +163,16 @@ const TERMINAL = new Set(['completed', 'canceled', 'duplicate'])
 export const isTerminal = (i: Issue | undefined) => !!i && TERMINAL.has(i.statusType)
 const has = (i: Issue | undefined, label: string) => !!i && i.labels.includes(label)
 
+/**
+ * Finished from the factory's point of view. Completion labels are the factory's record,
+ * so another automation moving a finished issue out of Done does not restart its work.
+ */
+export function closed(cfg: Config, i: Issue | undefined) {
+	if (!i) return false
+	if (isTerminal(i) || has(i, cfg.labels.integrated) || has(i, cfg.labels.delivered)) return true
+	return has(i, cfg.labels.test) && has(i, cfg.labels.passed)
+}
+
 export function jobKey(role: Role, issueId: string, attempt: number) {
 	return `${role}:${issueId}:${attempt}`
 }
@@ -273,7 +283,7 @@ function stillInStage(ctx: Ctx, job: Job): boolean {
 		case 'test':
 			return issue.status === cfg.statuses.active
 		case 'integrate':
-			return has(issue, cfg.labels.integrating) && !isTerminal(issue)
+			return has(issue, cfg.labels.integrating) && !closed(cfg, issue)
 		case 'resolve': {
 			// The resolver either removed the label or reported a new failure of its own.
 			const f = ctx.snap.failures[issue.id]
@@ -318,7 +328,7 @@ function monitorJobs(ctx: Ctx) {
 		const inStage = stillInStage(ctx, job)
 		const issue = snap.issues[job.issueId]
 		if (!issue || !inStage) {
-			if ((state === 'running' || state === 'unknown') && issue && !isTerminal(issue)) {
+			if ((state === 'running' || state === 'unknown') && issue && !closed(cfg, issue)) {
 				// Reported but still finishing its turn (for example sending the callback).
 				occupy(ctx, job)
 				continue
@@ -446,7 +456,7 @@ function applyRoute(ctx: Ctx, issue: Issue, stage: Stage, route: Exclude<RouteNa
 
 	if (route === 'repair' || route === 'repair-different' || (route === 'retry' && (stage === 'build' || (stage === 'test' && !isTest)))) {
 		const resumeThreadId = route === 'repair' ? lastJobThread(ctx.ledger, 'build', buildId) : undefined
-		const resetTests = testChildren(ctx, buildId).filter((id) => ctx.snap.issues[id]?.status !== cfg.statuses.ready)
+		const resetTests = testChildren(ctx, buildId).filter((id) => ctx.snap.issues[id]?.status !== cfg.statuses.ready || has(ctx.snap.issues[id], cfg.labels.passed))
 		ctx.steps.push({
 			action: {
 				type: 'patch', issueId: buildId,
@@ -493,7 +503,7 @@ function applyRoute(ctx: Ctx, issue: Issue, stage: Stage, route: Exclude<RouteNa
 function routeFailures(ctx: Ctx) {
 	const { snap, cfg, ledger } = ctx
 	for (const issue of Object.values(snap.issues)) {
-		if (!has(issue, cfg.labels.resolution) || has(issue, cfg.labels.hold) || isTerminal(issue)) continue
+		if (!has(issue, cfg.labels.resolution) || has(issue, cfg.labels.hold) || closed(cfg, issue)) continue
 		if (ctx.busyIssues.has(issue.id)) continue
 		const unit = unitOf(snap, cfg, issue.id)
 		if (ctx.exclusiveUnits.has(unit)) continue
@@ -542,7 +552,7 @@ function routeFailures(ctx: Ctx) {
 function expireWaits(ctx: Ctx) {
 	const { snap, cfg, ledger } = ctx
 	for (const issue of Object.values(snap.issues)) {
-		if (!has(issue, cfg.labels.waiting) || has(issue, cfg.labels.hold) || isTerminal(issue)) continue
+		if (!has(issue, cfg.labels.waiting) || has(issue, cfg.labels.hold) || closed(cfg, issue)) continue
 		if (ctx.busyIssues.has(issue.id) || ctx.exclusiveUnits.has(unitOf(snap, cfg, issue.id))) continue
 		const wait = ledger.waits[issue.id]
 		if (wait && wait.until > snap.now) {
@@ -557,7 +567,7 @@ function expireWaits(ctx: Ctx) {
 }
 
 function blockersDone(ctx: Ctx, issue: Issue) {
-	return (issue.blockedBy ?? []).every((id) => isTerminal(ctx.snap.issues[id]))
+	return (issue.blockedBy ?? []).every((id) => closed(ctx.cfg, ctx.snap.issues[id]))
 }
 
 function parked(ctx: Ctx, issue: Issue) {
@@ -584,7 +594,7 @@ function dispatchWork(ctx: Ctx) {
 	const { snap, cfg } = ctx
 	const { labels, statuses } = cfg
 	const issues = Object.values(snap.issues).sort((a, b) => (a.createdAt ?? a.id).localeCompare(b.createdAt ?? b.id, undefined, { numeric: true }))
-	const free = (i: Issue) => !ctx.busyIssues.has(i.id) && !parked(ctx, i) && !isTerminal(i)
+	const free = (i: Issue) => !ctx.busyIssues.has(i.id) && !parked(ctx, i) && !closed(cfg, i)
 	const activeJobFor = (role: Role, id: string) => Object.values(ctx.ledger.jobs).some((j) => j.role === role && j.issueId === id)
 	// Sub-issues count as ready in Todo or Backlog, so an external bounce to Backlog does not strand them.
 	const ready = (i: Issue) => i.status === statuses.ready || i.status === statuses.intake
@@ -598,18 +608,18 @@ function dispatchWork(ctx: Ctx) {
 
 		if (isIdea) {
 			const planned = has(issue, labels.planned)
-			if (issue.status === statuses.intake || (issue.status === statuses.active && has(issue, labels.idea) && !planned)) {
-				if (activeJobFor('plan', issue.id) || !capacity(ctx, 'plan')) continue
-				dispatch(ctx, 'plan', issue, { state: statuses.active, addLabels: [labels.idea] })
-			} else if (planned && issue.status === statuses.active) {
+			if (planned) {
 				const builds = (snap.children[issue.id] ?? []).map((id) => snap.issues[id]).filter((c) => has(c, labels.build))
-				if (builds.every((b) => isTerminal(b))) {
-					const done = builds.filter((b) => b.statusType === 'completed').length
+				if (builds.every((b) => closed(cfg, b))) {
+					const done = builds.filter((b) => has(b, labels.integrated) || b.statusType === 'completed').length
 					ctx.steps.push({
-						action: { type: 'patch', issueId: issue.id, patch: { state: statuses.done }, comment: `All ${builds.length} build issues are closed (${done} integrated into main). Factory marked this idea Done.` },
+						action: { type: 'patch', issueId: issue.id, patch: { state: statuses.done, addLabels: [labels.delivered] }, comment: `All ${builds.length} build issues are closed (${done} integrated into main). Factory marked this idea Done.` },
 						note: `idea done ${issue.id}`,
 					})
 				}
+			} else if (issue.status === statuses.intake || (issue.status === statuses.active && has(issue, labels.idea))) {
+				if (activeJobFor('plan', issue.id) || !capacity(ctx, 'plan')) continue
+				dispatch(ctx, 'plan', issue, { state: statuses.active, addLabels: [labels.idea] })
 			}
 			continue
 		}
@@ -619,7 +629,7 @@ function dispatchWork(ctx: Ctx) {
 			if (ctx.exclusiveUnits.has(unit)) continue
 			if (ready(issue)) {
 				const parent = issue.parentId ? snap.issues[issue.parentId] : undefined
-				if (parent && !has(parent, labels.planned) && !isTerminal(parent)) continue
+				if (parent && !has(parent, labels.planned) && !closed(cfg, parent)) continue
 				if (!blockersDone(ctx, issue) || !capacity(ctx, 'build')) continue
 				dispatch(ctx, 'build', issue, { state: statuses.active, removeLabels: [labels.integrating, labels.built] }, { cancelJobs: failureJobsToCancel(ctx, unit) })
 			} else if (issue.status === statuses.active && !built(issue) && !activeJobFor('build', issue.id)) {
@@ -635,7 +645,7 @@ function dispatchWork(ctx: Ctx) {
 					continue
 				}
 				const tests = testChildren(ctx, issue.id).map((id) => snap.issues[id])
-				const allPassed = tests.every((t) => t.statusType === 'completed' || t.statusType === 'canceled')
+				const allPassed = tests.every((t) => closed(cfg, t))
 				if (!allPassed || ctx.integrateActive || !capacity(ctx, 'integrate') || ctx.sharedUnits.has(unit)) continue
 				dispatch(ctx, 'integrate', issue, { addLabels: [labels.integrating] })
 			}

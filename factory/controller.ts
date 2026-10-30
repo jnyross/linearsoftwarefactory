@@ -173,7 +173,7 @@ async function perform(ports: Ports, cfg: Config, ledger: Ledger, snap: Snapshot
 			return
 		case 'dispatch': {
 			for (const key of action.cancelJobs) await supersede(ports, ledger, key)
-			for (const t of action.resetTests) await linear.update(t, { state: cfg.statuses.ready })
+			for (const t of action.resetTests) await linear.update(t, { state: cfg.statuses.ready, removeLabels: [cfg.labels.passed] })
 			// Claim before any I/O: the attempt number and consumed directive persist even if
 			// the rest of the dispatch fails and is finished later by resume-dispatch.
 			const { role, issueId, attempt } = action.job
@@ -196,7 +196,7 @@ async function perform(ports: Ports, cfg: Config, ledger: Ledger, snap: Snapshot
 			return supersede(ports, ledger, action.jobKey)
 		case 'patch': {
 			for (const key of action.cancelJobs ?? []) await supersede(ports, ledger, key)
-			for (const t of action.resetTests ?? []) await linear.update(t, { state: cfg.statuses.ready })
+			for (const t of action.resetTests ?? []) await linear.update(t, { state: cfg.statuses.ready, removeLabels: [cfg.labels.passed] })
 			await linear.update(action.issueId, action.patch)
 			if (action.comment) await linear.comment(action.issueId, action.comment)
 			return

@@ -141,8 +141,8 @@ const happyPlanner: Behavior = (w, t) => {
 	w.set(idea, { addLabels: [L.planned] })
 }
 const happyBuilder: Behavior = (w, t) => w.set(t.job.issueId, { addLabels: [L.built], removeLabels: [L.repair] })
-const happyTester: Behavior = (w, t) => w.set(t.job.issueId, { state: S.done })
-const happyIntegrator: Behavior = (w, t) => w.set(t.job.issueId, { state: S.done, removeLabels: [L.integrating, L.repair] })
+const happyTester: Behavior = (w, t) => w.set(t.job.issueId, { state: S.done, addLabels: [L.passed] })
+const happyIntegrator: Behavior = (w, t) => w.set(t.job.issueId, { state: S.done, addLabels: [L.integrated], removeLabels: [L.integrating, L.repair] })
 
 function happy(w: World) {
 	w.behaviors = { plan: happyPlanner, build: happyBuilder, test: happyTester, integrate: happyIntegrator }
@@ -208,7 +208,7 @@ describe('controller tick', () => {
 				w2.set(testIssue.id, { state: S.ready })
 				return
 			}
-			w2.set(t.job.issueId, { state: S.done })
+			happyTester(w2, t, '')
 		}
 		const idea = w.add('idea', S.active, [L.idea, L.planned])
 		const b = w.add('build', S.ready, [L.build], idea)
@@ -383,6 +383,34 @@ describe('controller tick', () => {
 		await w.cycle(10)
 		expect(w.get(b).status).toBe(S.done)
 		expect(w.get(idea).status).toBe(S.done)
+	})
+
+	test('finished work moved out of Done by another automation is not redone', async () => {
+		const w = new World()
+		happy(w)
+		const idea = w.add('idea', S.active, [L.idea, L.planned])
+		const b = w.add('build', S.ready, [L.build], idea)
+		const t = w.add('t', S.ready, [L.test], b)
+		const other = w.add('other build', S.ready, [L.build], idea)
+		w.add('other test', S.ready, [L.test], other)
+		w.behaviors.integrate = (w2, th) => {
+			happyIntegrator(w2, th, '')
+			if (th.job.issueId === b) {
+				// the external automation bounces finished issues to Backlog
+				w2.set(b, { state: S.intake })
+				w2.set(t, { state: S.intake })
+			}
+		}
+		await w.cycle(16)
+		expect(w.ledger!.attempts[`build:${b}`]).toBe(1)
+		expect(w.ledger!.attempts[`test:${t}`]).toBe(1)
+		expect(w.ledger!.attempts[`integrate:${b}`]).toBe(1)
+		expect(w.get(other).status).toBe(S.done)
+		expect(w.get(idea).status).toBe(S.done)
+		expect(w.get(idea).labels).toContain(L.delivered)
+		w.set(idea, { state: S.intake })
+		await w.cycle(3)
+		expect(w.ledger!.attempts[`plan:${idea}`]).toBeUndefined()
 	})
 
 	test('a hold label keeps the factory away from an issue', async () => {
