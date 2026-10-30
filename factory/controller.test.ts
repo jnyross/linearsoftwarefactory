@@ -413,6 +413,21 @@ describe('controller tick', () => {
 		expect(w.ledger!.attempts[`plan:${idea}`]).toBeUndefined()
 	})
 
+	test('a worker still running on work that another worker already finished is cancelled', async () => {
+		const w = new World()
+		w.behaviors = {}
+		const idea = w.add('idea', S.active, [L.idea, L.planned])
+		const b = w.add('build', S.ready, [L.build], idea)
+		await w.cycle(1)
+		const thread = [...w.threads.values()][0]
+		thread.state = 'running'
+		w.set(b, { state: S.done, addLabels: [L.integrated] })
+		await tick(w.ports())
+		expect(jobsNow(w)).toEqual([])
+		expect(thread.state).toBe('idle')
+		expect(w.ledger!.history.at(-1)!.outcome).toBe('superseded')
+	})
+
 	test('a hold label keeps the factory away from an issue', async () => {
 		const w = new World()
 		happy(w)

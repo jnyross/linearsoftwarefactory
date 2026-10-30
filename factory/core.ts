@@ -325,8 +325,13 @@ function monitorJobs(ctx: Ctx) {
 			continue
 		}
 		const state: ThreadState = (job.threadId && snap.threads[job.threadId]) || 'missing'
-		const inStage = stillInStage(ctx, job)
 		const issue = snap.issues[job.issueId]
+		if (job.role !== 'integrate' && job.role !== 'plan' && issue && closed(cfg, issue)) {
+			// Duplicate or late worker on finished work: stop it instead of letting it redo anything.
+			ctx.steps.push({ action: { type: 'cancel', jobKey: job.key, reason: 'issue already finished' }, note: `cancel ${job.key} (issue finished)` })
+			continue
+		}
+		const inStage = stillInStage(ctx, job)
 		if (!issue || !inStage) {
 			if ((state === 'running' || state === 'unknown') && issue && !closed(cfg, issue)) {
 				// Reported but still finishing its turn (for example sending the callback).
