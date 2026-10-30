@@ -99,8 +99,10 @@ function routingPort(tools: ToolCaller) {
 		usage: (threadId: string, range?: { start: number; end: number }) =>
 			run(['threads', 'usage', threadId, '--details', ...(range ? ['--start', iso(range.start), '--end', iso(range.end)] : [])]),
 		children: async (threadId: string) => {
-			const r = mcpJson(await tools.call('amp.find_thread', { query: `parent:${threadId}`, limit: 100 }))
-			return ((r.threads ?? []) as Array<{ id: string }>).map((t) => t.id)
+			// Built-in tool results vary in shape (structured, text, or nested); tools.call rejects on failure.
+			const raw = JSON.stringify(await tools.call('amp.find_thread', { query: `parent:${threadId}`, limit: 100 }))
+			const ids = [...raw.matchAll(/\\*"id\\*":\\*"(T-[0-9a-f-]{36})/g)].map((m) => m[1])
+			return [...new Set(ids)].filter((id) => id !== threadId)
 		},
 	}
 }
