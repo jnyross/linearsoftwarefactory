@@ -83,3 +83,13 @@ Stall detection: a worker that is idle while Linear still shows its stage in pro
 - Retry now: remove `lsf:waiting-dependency` from an issue, or remove the label and post a new comment explaining why.
 - Inspect: the controller thread transcript shows each tick summary; Linear comments show every dispatch, failure, route, and result.
 - Tests: `bun test` runs the controller simulation tests (`factory/controller.test.ts`) along with the product tests.
+
+## Live configuration (2026-10-30)
+
+- Amp project `linearsoftwarefactory` (`4cf2ea57-4aa2-455c-9674-8d1d4d5211c1`), Ship setting **custom-ship** with a direct-to-main prompt that resolves conflicts autonomously, retests, and never opens a pull request.
+- Controller thread [T-01a18e64-2afd-7046-88e1-10469c2a4c24](https://ampcode.com/threads/T-01a18e64-2afd-7046-88e1-10469c2a4c24) (`medium` mode, ChatGPT-only preset). Its schedule "Factory controller tick" runs `RRULE:FREQ=MINUTELY;INTERVAL=1`; each run syncs the orb to `origin/main`, reloads the plugin when main changed, and calls `lsf_tick`. Firings that land while the thread is busy are coalesced, so the real cadence is one to two minutes plus immediate ticks on worker callbacks.
+- Linear team LOO labels: `lsf:idea`, `lsf:planned`, `lsf:build`, `lsf:built`, `lsf:test`, `lsf:passed`, `lsf:repair`, `lsf:integrating`, `lsf:integrated`, `lsf:delivered`, `lsf:resolution-needed`, `lsf:waiting-dependency`, `lsf:hold`.
+
+## Known external interference
+
+LOO also has Linear Loops (Linear Agent automations) from an earlier PR-based setup. They comment on new issues, run a "QA" check when an issue enters In Review, and run a "merge/release" check when an issue enters Done; both checks move the issue to Backlog because there is no pull request or human assignee. The factory tolerates this: it never uses In Review, treats completion labels as its record, picks up bounced sub-issues, and cancels duplicate workers. The Loops still add comments and Linear Agent runs, so disable or narrow them in Linear (team LOO → Loops) when they are no longer wanted. Their configuration cannot be changed through the Linear MCP connection.
