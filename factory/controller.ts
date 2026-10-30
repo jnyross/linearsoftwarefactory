@@ -105,57 +105,87 @@ interface Guard {
 	offending: string[]
 }
 
+// Amp allows 60 usage reports per hour per user; stay well inside it.
+const AUDIT = { perTick: 6, perHour: 30, recheckMs: 15 * 60_000, settleMs: 2 * 60_000, staleMs: 45 * 60_000 }
+
 /**
- * Subscription-only enforcement, run before any step each tick. Fails closed: if the routing
- * table or usage cannot be read, no new model work starts. Unblocks automatically once clean.
+ * Subscription-only enforcement, run before any step each tick.
+ * - Hard gate every tick: the routing table must be subscription-only with ChatGPT serving the worker model.
+ * - Usage audit within the API budget: the controller and running workers every 15 minutes, each finished
+ *   worker once (with any threads it started). A request served by Amp credits or a non-subscription
+ *   connection blocks dispatch and stops that worker until the routing table changes.
+ * - Fails closed: unreadable routing, or audits that stay behind for 45 minutes, block dispatch.
  */
 async function routingGuard(ports: Ports, ledger: Ledger, now: number): Promise<Guard> {
 	if (!ports.routing) return { ok: true, offending: [] }
 	const routing = ports.routing
+	const state = (ledger.routing ??= { since: now, calls: [] })
+	state.since ??= now
+	state.calls = (state.calls ?? []).filter((t) => now - t < 3_600_000)
+	const audited = (ledger.audited ??= {})
 	const problems: string[] = []
 	const offending: string[] = []
-	let allowed = new Set<string>()
+	let verdict
 	try {
-		const v = checkProviders(await routing.providers())
-		allowed = v.allowed
-		if (!v.ok) problems.push(v.reason!)
+		verdict = checkProviders(await routing.providers())
 	} catch (e) {
 		problems.push(`cannot read model routing (${(e as Error).message})`)
 	}
-	if (!problems.length) {
-		const audits: Array<{ label: string; job?: string; run: () => Promise<string> }> = []
-		const start = Math.max(ledger.routing?.lastAuditAt ?? 0, now - 15 * 60_000)
-		audits.push({ label: `controller ${ports.controllerThreadId}`, run: () => routing.usage(ports.controllerThreadId, { start, end: now }) })
-		for (const j of Object.values(ledger.jobs)) if (j.threadId && j.phase === 'started') audits.push({ label: `${j.key} ${j.threadId}`, job: j.key, run: () => routing.usage(j.threadId!) })
-		const audited = (ledger.audited ??= {})
-		const finished = ledger.history.filter((h) => h.threadId && !audited[h.threadId] && now - h.at >= 120_000)
-		for (const h of finished) audits.push({ label: `${h.key} ${h.threadId}`, run: () => routing.usage(h.threadId!) })
-		// Workers cannot be denied code_exec, so also audit any threads they started.
-		const workerTargets = audits.slice(1)
-		const kids = await Promise.allSettled(workerTargets.map(async (a) => {
-			const id = a.label.split(' ').at(-1)!
-			const direct = await routing.children(id)
-			const nested = (await Promise.all(direct.map((c) => routing.children(c)))).flat()
-			return [...direct, ...nested].map((c) => ({ label: `${a.label} child ${c}`, job: a.job, run: () => routing.usage(c) }))
-		}))
-		kids.forEach((k, i) => {
-			if (k.status === 'fulfilled') audits.push(...k.value)
-			else problems.push(`cannot list child threads of ${workerTargets[i].label} (${(k.reason as Error)?.message ?? k.reason})`)
-		})
-		const results = await Promise.allSettled(audits.map((a) => a.run()))
-		results.forEach((r, i) => {
-			const a = audits[i]
-			if (r.status === 'rejected') return problems.push(`cannot audit ${a.label} (${(r.reason as Error)?.message ?? r.reason})`)
-			const bad = auditUsage(r.value, allowed)
-			if (bad.length) {
-				problems.push(`${a.label}: ${bad.join('; ')}`)
-				if (a.job) offending.push(a.job)
+	if (verdict && !verdict.ok) problems.push(verdict.reason!)
+	const fingerprint = verdict ? [...verdict.allowed].sort().join(',') : ''
+	if (state.violation && state.violation.fingerprint !== fingerprint) delete state.violation
+	if (verdict?.ok) {
+		type Target = { label: string; thread: string; job?: string; range?: { start: number; end: number } }
+		const targets: Target[] = []
+		const controllerAt = state.controllerAuditAt ?? 0
+		if (now - controllerAt >= AUDIT.recheckMs) targets.push({ label: 'controller', thread: ports.controllerThreadId, range: { start: Math.max(controllerAt, now - 3_600_000), end: now } })
+		const running = Object.values(ledger.jobs).filter((j) => j.threadId && j.phase === 'started')
+		for (const j of running) if (now - (audited[j.threadId!] ?? 0) >= AUDIT.recheckMs) targets.push({ label: j.key, thread: j.threadId!, job: j.key })
+		const runningThreads = new Set(running.map((j) => j.threadId))
+		const finished = new Map<string, { key: string; at: number }>()
+		for (const h of ledger.history) if (h.threadId && !runningThreads.has(h.threadId)) finished.set(h.threadId, { key: h.key, at: h.at })
+		const due = [...finished].filter(([t, h]) => now - h.at >= AUDIT.settleMs && (audited[t] ?? 0) < h.at + AUDIT.settleMs).sort((a, b) => b[1].at - a[1].at)
+		for (const [t, h] of due) targets.push({ label: h.key, thread: t })
+		let budget = Math.min(AUDIT.perTick, AUDIT.perHour - state.calls.length)
+		for (const target of targets) {
+			if (budget <= 0) break
+			let threads: string[]
+			try {
+				threads = [target.thread, ...(target.label === 'controller' ? [] : await routing.children(target.thread))]
+			} catch {
+				continue // retried next tick; staleness check below fails closed if this persists
 			}
-		})
-		if (!problems.length) for (const h of finished) audited[h.threadId!] = now
+			if (threads.length > budget) break
+			const bad: string[] = []
+			let complete = true
+			for (const t of threads) {
+				budget--
+				state.calls.push(now)
+				try {
+					const v = auditUsage(await routing.usage(t, t === target.thread ? target.range : undefined), verdict.allowed)
+					if (v.length) bad.push(`${t === target.thread ? '' : `child ${t}: `}${v.join('; ')}`)
+				} catch {
+					complete = false
+				}
+			}
+			if (bad.length) {
+				state.violation = { fingerprint, reason: `${target.label} ${target.thread}: ${bad.join(' | ')}`, at: now }
+				if (target.job) offending.push(target.job)
+			}
+			if (complete) {
+				if (target.label === 'controller') state.controllerAuditAt = now
+				else audited[target.thread] = now
+			}
+		}
+		const behind = due.filter(([t, h]) => h.at >= state.since! && (audited[t] ?? 0) < h.at && now - h.at > AUDIT.staleMs)
+		if (now - (state.controllerAuditAt ?? state.since!) > AUDIT.staleMs) behind.push([ports.controllerThreadId, { key: 'controller', at: 0 }])
+		if (behind.length) problems.push(`usage audit is more than 45 minutes behind for ${behind.map(([t, h]) => `${h.key} ${t}`).join(', ')}`)
 	}
+	if (state.violation) problems.push(`paid or non-subscription model routing seen (${state.violation.reason}); dispatch stays blocked until model routing changes`)
 	const ok = problems.length === 0
-	ledger.routing = ok ? { lastAuditAt: now } : { ...ledger.routing, blockedSince: ledger.routing?.blockedSince ?? now, reason: problems.join(' | ') }
+	if (ok) delete state.blockedSince
+	else state.blockedSince ??= now
+	state.reason = ok ? undefined : problems.join(' | ')
 	await ports.store.save(ledger)
 	return ok ? { ok, offending } : { ok, reason: problems.join(' | '), offending }
 }

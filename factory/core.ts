@@ -111,7 +111,7 @@ export interface Ledger {
 	waits: Record<string, Wait>
 	routesPerIssue: Record<string, number>
 	/** Subscription-only routing guard state. */
-	routing?: { blockedSince?: number; reason?: string; lastAuditAt?: number }
+	routing?: { since?: number; calls?: number[]; controllerAuditAt?: number; blockedSince?: number; reason?: string; violation?: { fingerprint: string; reason: string; at: number } }
 	/** Finished worker threads whose usage was audited. */
 	audited?: Record<string, number>
 }

@@ -73,7 +73,7 @@ class World {
 						providers: async () => routing.connections,
 						children: async (id) => routing.children?.[id] ?? [],
 						usage: async (id) =>
-							`## Model Routing\n\n| Model ID | Purpose | Routing | Requests | Cost |\n| --- | --- | --- | ---: | ---: |\n| openai/gpt-6.1-sol | Agent | ${id === 'T-controller' ? 'Via [ChatGPT](https://ampcode.com/settings/model-routing#c-chatgpt)' : id.startsWith('T-child') ? routing.childRoute : routing.workerRoute} | 3 | $0 |\n`,
+							`## Model Routing\n\n| Model ID | Purpose | Routing | Requests | Cost |\n| --- | --- | --- | ---: | ---: |\n| openai/gpt-6.1-sol | Agent | ${id === 'T-controller' ? `Via [ChatGPT](https://ampcode.com/settings/model-routing#${routing.connections[0].id})` : id.startsWith('T-child') ? routing.childRoute : routing.workerRoute} | 3 | $0 |\n`,
 					}
 				: undefined,
 			controllerThreadId: 'T-controller',
@@ -464,8 +464,14 @@ describe('controller tick', () => {
 		expect(r2.errors.join()).toContain('Amp')
 		expect([...w.threads.values()].every((t) => t.state === 'idle')).toBe(true) // offending workers stopped
 		expect(w.get(c).status).toBe(S.ready)
-		// Routing clean again: dispatch resumes automatically.
+		// The violation keeps blocking while routing is unchanged, even if later reports look clean.
 		w.routing.workerRoute = sub
+		const still = await tick(w.ports())
+		expect(still.errors.join()).toContain('until model routing changes')
+		expect(w.createdThreads).toBe(2)
+		// Model routing changes (the paid path is gone): dispatch resumes automatically.
+		w.routing.connections = [{ id: 'c-chatgpt2', type: 'model_provider_chatgpt', active: true, priority: 0 }]
+		w.routing.workerRoute = 'Via [ChatGPT](https://ampcode.com/settings/model-routing#c-chatgpt2)'
 		const r3 = await tick(w.ports())
 		expect(r3.errors).toEqual([])
 		expect(w.createdThreads).toBe(3)
@@ -480,6 +486,39 @@ describe('controller tick', () => {
 		expect(r4.errors.join()).toContain('child T-child-1')
 		expect(r4.errors.join()).toContain(`stopped ${worker.key}`)
 		expect(w.createdThreads).toBe(3)
+	})
+
+	test('routing audits stay inside the usage API budget and defer rather than fail on rate limits', async () => {
+		const w = new World()
+		w.behaviors = {}
+		w.routing = { connections: [{ id: 'c-chatgpt', type: 'model_provider_chatgpt', active: true, priority: 0 }], workerRoute: 'Via [ChatGPT](https://ampcode.com/settings/model-routing#c-chatgpt)' }
+		const ports = w.ports()
+		let calls = 0
+		let limited = false
+		const usage = ports.routing!.usage
+		ports.routing!.usage = async (id, range) => {
+			calls++
+			if (limited) throw new Error('Usage information is limited to 60 requests per hour.')
+			return usage(id, range)
+		}
+		// History from before the guard existed audits lazily and never blocks work.
+		w.ledger = emptyLedger()
+		for (let i = 0; i < 25; i++) w.ledger.history.push({ key: `test:LOO-9${i}:1`, role: 'test', issueId: `LOO-9${i}`, threadId: `T-old-${i}`, outcome: 'reported', at: w.now - 3_600_000 })
+		const idea = w.add('idea', S.active, [L.idea, L.planned])
+		w.add('b', S.ready, [L.build], idea)
+		for (let i = 0; i < 10; i++) {
+			const r = await tick(ports)
+			expect(r.errors).toEqual([])
+			w.now += 60_000
+		}
+		expect(calls).toBeLessThanOrEqual(30)
+		expect(w.createdThreads).toBe(1)
+		// A rate-limited audit is deferred, not a violation; a gap that persists fails closed.
+		limited = true
+		w.now += 20 * 60_000
+		expect((await tick(ports)).errors).toEqual([])
+		w.now += 30 * 60_000
+		expect((await tick(ports)).errors.join()).toContain('more than 45 minutes behind')
 	})
 
 	test('a hold label keeps the factory away from an issue', async () => {
