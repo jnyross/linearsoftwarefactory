@@ -269,6 +269,7 @@ function stillInStage(ctx: Ctx, job: Job): boolean {
 		case 'plan':
 			return issue.status === cfg.statuses.active && !has(issue, cfg.labels.planned)
 		case 'build':
+			return issue.status === cfg.statuses.active && !has(issue, cfg.labels.built)
 		case 'test':
 			return issue.status === cfg.statuses.active
 		case 'integrate':
@@ -293,6 +294,7 @@ function finishJob(outcome: string, job: Job) {
 function stageRevert(cfg: Config, role: Role): Patch {
 	switch (role) {
 		case 'build':
+			return { state: cfg.statuses.ready, addLabels: [cfg.labels.resolution], removeLabels: [cfg.labels.built] }
 		case 'test':
 			return { state: cfg.statuses.ready, addLabels: [cfg.labels.resolution] }
 		case 'integrate':
@@ -448,7 +450,7 @@ function applyRoute(ctx: Ctx, issue: Issue, stage: Stage, route: Exclude<RouteNa
 		ctx.steps.push({
 			action: {
 				type: 'patch', issueId: buildId,
-				patch: { state: cfg.statuses.ready, addLabels: [cfg.labels.repair], removeLabels: [...removeLabels, cfg.labels.integrating] },
+				patch: { state: cfg.statuses.ready, addLabels: [cfg.labels.repair], removeLabels: [...removeLabels, cfg.labels.integrating, cfg.labels.built] },
 				comment: `Factory routed this build to **${route}** after a ${stage} failure (\`${failure.kind}\`: ${failure.signature}). All test sub-issues will rerun after the repair.`,
 				resetTests,
 				cancelJobs: failureJobsToCancel(ctx, unit),
@@ -463,7 +465,7 @@ function applyRoute(ctx: Ctx, issue: Issue, stage: Stage, route: Exclude<RouteNa
 
 	if (route === 'integrate-retry') {
 		ctx.steps.push({
-			action: { type: 'patch', issueId: build.id, patch: { state: cfg.statuses.review, removeLabels: [...removeLabels, cfg.labels.integrating] }, comment: `Factory scheduled an **integration retry** after \`${failure.kind}\`: ${failure.signature}.` },
+			action: { type: 'patch', issueId: build.id, patch: { state: cfg.statuses.active, addLabels: [cfg.labels.built], removeLabels: [...removeLabels, cfg.labels.integrating] }, comment: `Factory scheduled an **integration retry** after \`${failure.kind}\`: ${failure.signature}.` },
 			commit: (l) => { l.directives[`integrate:${build.id}`] = directive; extraCommit?.(l) },
 			note: `integrate-retry ${build.id}`,
 		})
@@ -475,7 +477,7 @@ function applyRoute(ctx: Ctx, issue: Issue, stage: Stage, route: Exclude<RouteNa
 	const entry: Patch =
 		stage === 'plan' ? { state: cfg.statuses.active, removeLabels: [...removeLabels, cfg.labels.planned] }
 		: stage === 'test' ? { state: cfg.statuses.ready, removeLabels }
-		: stage === 'integrate' ? { state: cfg.statuses.review, removeLabels: [...removeLabels, cfg.labels.integrating] }
+		: stage === 'integrate' ? { state: cfg.statuses.active, addLabels: [cfg.labels.built], removeLabels: [...removeLabels, cfg.labels.integrating] }
 		: { removeLabels: [cfg.labels.waiting], addLabels: [cfg.labels.resolution] }
 	if (stage === 'resolve') return applyRoute(ctx, issue, stage, 'resolve', failure, extraCommit)
 	const role: Role = stage
@@ -581,6 +583,9 @@ function dispatchWork(ctx: Ctx) {
 	const issues = Object.values(snap.issues).sort((a, b) => (a.createdAt ?? a.id).localeCompare(b.createdAt ?? b.id, undefined, { numeric: true }))
 	const free = (i: Issue) => !ctx.busyIssues.has(i.id) && !parked(ctx, i) && !isTerminal(i)
 	const activeJobFor = (role: Role, id: string) => Object.values(ctx.ledger.jobs).some((j) => j.role === role && j.issueId === id)
+	// Sub-issues count as ready in Todo or Backlog, so an external bounce to Backlog does not strand them.
+	const ready = (i: Issue) => i.status === statuses.ready || i.status === statuses.intake
+	const built = (i: Issue) => i.status === statuses.active && has(i, labels.built)
 
 	for (const issue of issues) {
 		if (!free(issue)) continue
@@ -609,15 +614,15 @@ function dispatchWork(ctx: Ctx) {
 		if (isBuild) {
 			const unit = issue.id
 			if (ctx.exclusiveUnits.has(unit)) continue
-			if (issue.status === statuses.ready) {
+			if (ready(issue)) {
 				const parent = issue.parentId ? snap.issues[issue.parentId] : undefined
 				if (parent && !has(parent, labels.planned) && !isTerminal(parent)) continue
 				if (!blockersDone(ctx, issue) || !capacity(ctx, 'build')) continue
-				dispatch(ctx, 'build', issue, { state: statuses.active, removeLabels: [labels.integrating] }, { cancelJobs: failureJobsToCancel(ctx, unit) })
-			} else if (issue.status === statuses.active && !activeJobFor('build', issue.id)) {
+				dispatch(ctx, 'build', issue, { state: statuses.active, removeLabels: [labels.integrating, labels.built] }, { cancelJobs: failureJobsToCancel(ctx, unit) })
+			} else if (issue.status === statuses.active && !built(issue) && !activeJobFor('build', issue.id)) {
 				ctx.busyIssues.add(issue.id)
 				ctx.steps.push({ action: { type: 'orphan', issueId: issue.id, role: 'build' }, note: `orphan build ${issue.id}` })
-			} else if (issue.status === statuses.review) {
+			} else if (built(issue)) {
 				if (has(issue, labels.integrating)) {
 					if (!activeJobFor('integrate', issue.id)) {
 						ctx.busyIssues.add(issue.id)
@@ -641,8 +646,8 @@ function dispatchWork(ctx: Ctx) {
 				ctx.steps.push({ action: { type: 'orphan', issueId: issue.id, role: 'test' }, note: `orphan test ${issue.id}` })
 				continue
 			}
-			if (issue.status !== statuses.ready || !build) continue
-			if (build.status !== statuses.review || parked(ctx, build) || has(build, labels.integrating)) continue
+			if (!ready(issue) || !build) continue
+			if (!built(build) || parked(ctx, build) || has(build, labels.integrating)) continue
 			if (ctx.exclusiveUnits.has(build.id) || ctx.busyIssues.has(build.id) || !capacity(ctx, 'test')) continue
 			dispatch(ctx, 'test', issue, { state: statuses.active })
 		}

@@ -140,7 +140,7 @@ const happyPlanner: Behavior = (w, t) => {
 	}
 	w.set(idea, { addLabels: [L.planned] })
 }
-const happyBuilder: Behavior = (w, t) => w.set(t.job.issueId, { state: S.review, removeLabels: [L.repair] })
+const happyBuilder: Behavior = (w, t) => w.set(t.job.issueId, { addLabels: [L.built], removeLabels: [L.repair] })
 const happyTester: Behavior = (w, t) => w.set(t.job.issueId, { state: S.done })
 const happyIntegrator: Behavior = (w, t) => w.set(t.job.issueId, { state: S.done, removeLabels: [L.integrating, L.repair] })
 
@@ -204,7 +204,7 @@ describe('controller tick', () => {
 			if (testIssue.title === 'test one' && failures === 0) {
 				failures++
 				w2.fail(testIssue.parentId!, 'test', 'test-failure', 'test-failure test/one.test.ts > rejects empty input')
-				w2.set(testIssue.parentId!, { state: S.ready })
+				w2.set(testIssue.parentId!, { state: S.ready, removeLabels: [L.built] })
 				w2.set(testIssue.id, { state: S.ready })
 				return
 			}
@@ -243,7 +243,7 @@ describe('controller tick', () => {
 			happyIntegrator(w2, t, '')
 		}
 		const idea = w.add('idea', S.active, [L.idea, L.planned])
-		const b = w.add('build', S.review, [L.build], idea)
+		const b = w.add('build', S.active, [L.build, L.built], idea)
 		w.add('t', S.done, [L.test], b)
 		await w.cycle(16)
 		expect(w.get(b).status).toBe(S.done)
@@ -334,7 +334,8 @@ describe('controller tick', () => {
 		await w.cycle(6) // idle for > staleAfterIdleMs -> nudge
 		expect(builderTurns).toBe(2)
 		await w.cycle(20) // nudge grace elapses -> stale failure -> retry -> attempt 2 succeeds
-		expect(w.get(b).status).toBe(S.review)
+		expect(w.get(b).status).toBe(S.active)
+		expect(w.get(b).labels).toContain(L.built)
 		expect(w.ledger!.attempts[`build:${b}`]).toBe(2)
 		expect(w.get(b).comments.some((c) => c.body.includes('"kind":"stale"'))).toBe(true)
 	})
@@ -367,6 +368,19 @@ describe('controller tick', () => {
 		await tick(w.ports())
 		expect(w.createdThreads).toBe(1)
 		expect(jobsNow(w)).toEqual([`build:${b}:1`])
+	})
+
+	test('a build bounced to Backlog by another automation is picked up again', async () => {
+		const w = new World()
+		happy(w)
+		const idea = w.add('idea', S.active, [L.idea, L.planned])
+		const b = w.add('build', S.ready, [L.build], idea)
+		w.add('t', S.ready, [L.test], b)
+		await w.cycle(1)
+		w.set(b, { state: S.intake, removeLabels: [L.built] }) // external actor moves it
+		await w.cycle(10)
+		expect(w.get(b).status).toBe(S.done)
+		expect(w.get(idea).status).toBe(S.done)
 	})
 
 	test('a hold label keeps the factory away from an issue', async () => {
