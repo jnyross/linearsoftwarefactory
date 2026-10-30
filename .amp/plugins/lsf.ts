@@ -85,6 +85,26 @@ function linearPort(tools: ToolCaller) {
 	}
 }
 
+async function run(args: string[]): Promise<string> {
+	const p = Bun.spawn(['amp', ...args], { stdout: 'pipe', stderr: 'pipe' })
+	const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited])
+	if (code !== 0 || /^Error:/m.test(out)) throw new Error(`amp ${args[0]} ${args[1]} failed: ${(err || out).trim().slice(0, 300)}`)
+	return out
+}
+
+function routingPort(tools: ToolCaller) {
+	const iso = (ms: number) => new Date(Math.floor(ms / 1000) * 1000).toISOString()
+	return {
+		providers: async () => JSON.parse(await run(['config', 'model-providers', 'list', '--json'])),
+		usage: (threadId: string, range?: { start: number; end: number }) =>
+			run(['threads', 'usage', threadId, '--details', ...(range ? ['--start', iso(range.start), '--end', iso(range.end)] : [])]),
+		children: async (threadId: string) => {
+			const r = mcpJson(await tools.call('amp.find_thread', { query: `parent:${threadId}`, limit: 100 }))
+			return ((r.threads ?? []) as Array<{ id: string }>).map((t) => t.id)
+		},
+	}
+}
+
 async function loadLedger(): Promise<Ledger | null> {
 	try {
 		return JSON.parse(await readFile(LEDGER, 'utf8'))
@@ -113,7 +133,8 @@ export default function (amp: PluginAPI) {
 		model: config.worker.model as `${string}/${string}`,
 		reasoningEffort: config.worker.reasoningEffort as 'high',
 		instructions: WORKER_INSTRUCTIONS,
-		tools: 'all',
+		// Painter is an Amp-credit image model; create_thread would start unaudited model work.
+		tools: { exclude: ['painter', 'create_thread'] },
 		features: [],
 		display: { label: 'lsf-worker', color: '#26B5CE' },
 	})
@@ -173,6 +194,7 @@ export default function (amp: PluginAPI) {
 			if (running) return `A tick is already running; its result: ${await running}`
 			const ports: Ports = {
 				linear: linearPort(ctx.tools),
+				routing: routingPort(ctx.tools),
 				threads,
 				store: { load: loadLedger, save: saveLedger },
 				controllerThreadId,

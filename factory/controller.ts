@@ -19,6 +19,7 @@ import {
 	type ThreadState,
 } from './core'
 import { nudgePrompt, workerPrompt } from './prompts'
+import { auditUsage, checkProviders, type Connection } from './routing'
 
 export interface Comment {
 	id: string
@@ -48,7 +49,16 @@ export interface StorePort {
 	save(ledger: Ledger): Promise<void>
 }
 
+export interface RoutingPort {
+	providers(): Promise<Connection[]>
+	/** Markdown from `amp threads usage <thread> --details`, optionally limited to [start, end). */
+	usage(threadId: string, range?: { start: number; end: number }): Promise<string>
+	/** Direct child threads (for example subagent panels a worker started). */
+	children(threadId: string): Promise<string[]>
+}
+
 export interface Ports {
+	routing?: RoutingPort
 	linear: LinearPort
 	threads: ThreadPort
 	store: StorePort
@@ -87,6 +97,67 @@ export function latestFailure(issueId: string, comments: Comment[]): Failure | n
 
 export function failureComment(f: { stage: Stage; kind: FailureKind; signature: string; summary: string }) {
 	return `<!-- lsf-failure ${JSON.stringify({ stage: f.stage, kind: f.kind, signature: f.signature })} -->\n**Factory controller detected a ${f.stage} failure** (\`${f.kind}\`).\n\n${f.summary}`
+}
+
+interface Guard {
+	ok: boolean
+	reason?: string
+	offending: string[]
+}
+
+/**
+ * Subscription-only enforcement, run before any step each tick. Fails closed: if the routing
+ * table or usage cannot be read, no new model work starts. Unblocks automatically once clean.
+ */
+async function routingGuard(ports: Ports, ledger: Ledger, now: number): Promise<Guard> {
+	if (!ports.routing) return { ok: true, offending: [] }
+	const routing = ports.routing
+	const problems: string[] = []
+	const offending: string[] = []
+	let allowed = new Set<string>()
+	try {
+		const v = checkProviders(await routing.providers())
+		allowed = v.allowed
+		if (!v.ok) problems.push(v.reason!)
+	} catch (e) {
+		problems.push(`cannot read model routing (${(e as Error).message})`)
+	}
+	if (!problems.length) {
+		const audits: Array<{ label: string; job?: string; run: () => Promise<string> }> = []
+		const start = Math.max(ledger.routing?.lastAuditAt ?? 0, now - 15 * 60_000)
+		audits.push({ label: `controller ${ports.controllerThreadId}`, run: () => routing.usage(ports.controllerThreadId, { start, end: now }) })
+		for (const j of Object.values(ledger.jobs)) if (j.threadId && j.phase === 'started') audits.push({ label: `${j.key} ${j.threadId}`, job: j.key, run: () => routing.usage(j.threadId!) })
+		const audited = (ledger.audited ??= {})
+		const finished = ledger.history.filter((h) => h.threadId && !audited[h.threadId] && now - h.at >= 120_000)
+		for (const h of finished) audits.push({ label: `${h.key} ${h.threadId}`, run: () => routing.usage(h.threadId!) })
+		// Workers cannot be denied code_exec, so also audit any threads they started.
+		const workerTargets = audits.slice(1)
+		const kids = await Promise.allSettled(workerTargets.map(async (a) => {
+			const id = a.label.split(' ').at(-1)!
+			const direct = await routing.children(id)
+			const nested = (await Promise.all(direct.map((c) => routing.children(c)))).flat()
+			return [...direct, ...nested].map((c) => ({ label: `${a.label} child ${c}`, job: a.job, run: () => routing.usage(c) }))
+		}))
+		kids.forEach((k, i) => {
+			if (k.status === 'fulfilled') audits.push(...k.value)
+			else problems.push(`cannot list child threads of ${workerTargets[i].label} (${(k.reason as Error)?.message ?? k.reason})`)
+		})
+		const results = await Promise.allSettled(audits.map((a) => a.run()))
+		results.forEach((r, i) => {
+			const a = audits[i]
+			if (r.status === 'rejected') return problems.push(`cannot audit ${a.label} (${(r.reason as Error)?.message ?? r.reason})`)
+			const bad = auditUsage(r.value, allowed)
+			if (bad.length) {
+				problems.push(`${a.label}: ${bad.join('; ')}`)
+				if (a.job) offending.push(a.job)
+			}
+		})
+		if (!problems.length) for (const h of finished) audited[h.threadId!] = now
+	}
+	const ok = problems.length === 0
+	ledger.routing = ok ? { lastAuditAt: now } : { ...ledger.routing, blockedSince: ledger.routing?.blockedSince ?? now, reason: problems.join(' | ') }
+	await ports.store.save(ledger)
+	return ok ? { ok, offending } : { ok, reason: problems.join(' | '), offending }
 }
 
 async function collect(ports: Ports, cfg: Config, ledger: Ledger, now: number): Promise<Snapshot> {
@@ -145,9 +216,21 @@ export async function tick(ports: Ports, cfg: Config = defaultConfig): Promise<T
 	const log = ports.log ?? (() => {})
 	const ledger = (await ports.store.load()) ?? emptyLedger()
 	const snap = await collect(ports, cfg, ledger, now)
-	const steps = decide(snap, ledger, cfg)
 	const notes: string[] = []
 	const errors: string[] = []
+	const guard = await routingGuard(ports, ledger, now)
+	let steps = decide(snap, ledger, cfg)
+	if (!guard.ok) {
+		// Never start or prompt model work while routing is unverified or not subscription-only.
+		const held = steps.filter((s) => s.action.type === 'dispatch' || s.action.type === 'resume-dispatch' || s.action.type === 'nudge')
+		steps = steps.filter((s) => !held.includes(s))
+		for (const key of guard.offending) {
+			const job = ledger.jobs[key]
+			if (job?.threadId) await ports.threads.cancel(job.threadId).catch(() => {})
+		}
+		errors.push(`routing guard: ${guard.reason}; held ${held.length} dispatch/nudge steps${guard.offending.length ? `, stopped ${guard.offending.join(', ')}` : ''}`)
+		log(`lsf routing guard blocked: ${guard.reason}`)
+	}
 	for (const step of steps) {
 		try {
 			await perform(ports, cfg, ledger, snap, step.action)

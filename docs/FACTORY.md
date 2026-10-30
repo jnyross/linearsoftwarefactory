@@ -73,6 +73,11 @@ Stall detection: a worker that is idle while Linear still shows its stage in pro
 
 ## Safeguards
 
+- **Subscription-only routing guard** (`factory/routing.ts`), checked at the start of every tick and fail-closed:
+  - every active model-provider connection must be a subscription (ChatGPT, Claude, Grok), and an active ChatGPT subscription must serve the worker model;
+  - the usage report (`amp threads usage --details`) of the controller (last 15 minutes), every running worker, every thread a worker started, and every newly finished worker must show each model request routed through one of those subscription connections at $0 Amp cost.
+  - On any violation, or if routing or usage cannot be read, the tick dispatches and nudges nothing, cancels the offending workers, and reports `routing guard: ...` in its output. It resumes automatically once the check is clean. It never changes routing, billing, or provider settings.
+- Workers cannot use Painter (an Amp-credit image model) or `create_thread`. Amp keeps `code_exec` available to every agent, so plugin tools stay reachable through it; the guard audits worker child threads for that reason.
 - Workers run in the plugin's `lsf-worker` mode: the `medium` prompt and tools with the model pinned to `openai/gpt-6.1-sol` (high effort), served by John's ChatGPT subscription, and no extra features (no `fast` or `plaid`). Amp requires a registered custom mode for orb threads spawned from a plugin tool, and custom modes do not follow the Tune Modes preset, so the pin lives in `factory/config.json`. Nothing changes billing or model settings.
 - No pull requests; only the integrator pushes `main`, and never with force. Builders push only their branch; testers push nothing.
 - Tests are never weakened to get a pass, and unverified work is never marked Done.

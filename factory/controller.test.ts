@@ -30,6 +30,8 @@ class World {
 	createdThreads = 0
 	behaviors: Partial<Record<Job['role'], Behavior>> = {}
 	failCreateOnce = false
+	/** When set, the routing port reports this usage row for worker threads. */
+	routing: { connections: Array<{ id: string; type: string; active: boolean; priority: number }>; workerRoute: string; children?: Record<string, string[]>; childRoute?: string } | null = null
 
 	add(title: string, status: string, labels: string[] = [], parentId: string | null = null, blockedBy: string[] = []) {
 		const id = `LOO-${this.seq++}`
@@ -64,7 +66,16 @@ class World {
 	}
 
 	ports(): Ports {
+		const routing = this.routing
 		return {
+			routing: routing
+				? {
+						providers: async () => routing.connections,
+						children: async (id) => routing.children?.[id] ?? [],
+						usage: async (id) =>
+							`## Model Routing\n\n| Model ID | Purpose | Routing | Requests | Cost |\n| --- | --- | --- | ---: | ---: |\n| openai/gpt-6.1-sol | Agent | ${id === 'T-controller' ? 'Via [ChatGPT](https://ampcode.com/settings/model-routing#c-chatgpt)' : id.startsWith('T-child') ? routing.childRoute : routing.workerRoute} | 3 | $0 |\n`,
+					}
+				: undefined,
 			controllerThreadId: 'T-controller',
 			now: () => this.now,
 			store: { load: async () => (this.ledger ? structuredClone(this.ledger) : null), save: async (l) => void (this.ledger = structuredClone(l)) },
@@ -426,6 +437,49 @@ describe('controller tick', () => {
 		expect(jobsNow(w)).toEqual([])
 		expect(thread.state).toBe('idle')
 		expect(w.ledger!.history.at(-1)!.outcome).toBe('superseded')
+	})
+
+	test('routing guard holds dispatch on a paid route, stops the offending worker, and resumes when clean', async () => {
+		const w = new World()
+		happy(w)
+		const sub = 'Via [ChatGPT](https://ampcode.com/settings/model-routing#c-chatgpt)'
+		w.routing = { connections: [{ id: 'c-chatgpt', type: 'model_provider_chatgpt', active: true, priority: 0 }], workerRoute: sub }
+		const idea = w.add('idea', S.active, [L.idea, L.planned])
+		const a = w.add('a', S.ready, [L.build], idea)
+		const b = w.add('b', S.ready, [L.build], idea)
+		w.behaviors.build = () => {} // builders stay busy
+		const r0 = await tick(w.ports())
+		expect(r0.errors).toEqual([])
+		expect(w.createdThreads).toBe(2)
+		for (const t of w.threads.values()) t.state = 'running'
+		// A worker's usage shows an Amp-served request, and an API key appears in routing.
+		w.routing.workerRoute = 'Amp'
+		w.routing.connections.push({ id: 'k', type: 'model_provider_openai', active: true, priority: 1 })
+		const c = w.add('c', S.ready, [L.build], idea)
+		const r = await tick(w.ports())
+		expect(r.errors.some((e) => e.startsWith('routing guard:'))).toBe(true)
+		expect(w.createdThreads).toBe(2) // c not dispatched
+		w.routing.connections.pop()
+		const r2 = await tick(w.ports())
+		expect(r2.errors.join()).toContain('Amp')
+		expect([...w.threads.values()].every((t) => t.state === 'idle')).toBe(true) // offending workers stopped
+		expect(w.get(c).status).toBe(S.ready)
+		// Routing clean again: dispatch resumes automatically.
+		w.routing.workerRoute = sub
+		const r3 = await tick(w.ports())
+		expect(r3.errors).toEqual([])
+		expect(w.createdThreads).toBe(3)
+		expect(w.get(c).status).toBe(S.active)
+		expect([a, b].every((id) => w.get(id).status === S.active)).toBe(true)
+		// A thread a worker started (for example a subagent panel) is audited too.
+		const worker = Object.values(w.ledger!.jobs).find((j) => j.issueId === c)!
+		w.routing.children = { [worker.threadId!]: ['T-child-1'] }
+		w.routing.childRoute = 'Amp'
+		w.add('d', S.ready, [L.build], idea)
+		const r4 = await tick(w.ports())
+		expect(r4.errors.join()).toContain('child T-child-1')
+		expect(r4.errors.join()).toContain(`stopped ${worker.key}`)
+		expect(w.createdThreads).toBe(3)
 	})
 
 	test('a hold label keeps the factory away from an issue', async () => {

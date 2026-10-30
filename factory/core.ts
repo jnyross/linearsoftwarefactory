@@ -110,6 +110,10 @@ export interface Ledger {
 	directives: Record<string, Directive>
 	waits: Record<string, Wait>
 	routesPerIssue: Record<string, number>
+	/** Subscription-only routing guard state. */
+	routing?: { blockedSince?: number; reason?: string; lastAuditAt?: number }
+	/** Finished worker threads whose usage was audited. */
+	audited?: Record<string, number>
 }
 
 export function emptyLedger(): Ledger {
