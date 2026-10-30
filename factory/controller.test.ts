@@ -516,8 +516,15 @@ describe('controller tick', () => {
 		// A rate-limited audit is deferred, not a violation; a gap that persists fails closed.
 		limited = true
 		w.now += 20 * 60_000
+		const before = calls
 		expect((await tick(ports)).errors).toEqual([])
-		w.now += 30 * 60_000
+		// One rejected call starts a backoff; later ticks do not keep spending the hourly limit.
+		for (let i = 0; i < 5; i++) {
+			w.now += 60_000
+			expect((await tick(ports)).errors).toEqual([])
+		}
+		expect(calls - before).toBe(1)
+		w.now += 25 * 60_000
 		expect((await tick(ports)).errors.join()).toContain('more than 45 minutes behind')
 	})
 

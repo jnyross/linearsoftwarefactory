@@ -106,7 +106,7 @@ interface Guard {
 }
 
 // Amp allows 60 usage reports per hour per user; stay well inside it.
-const AUDIT = { perTick: 6, perHour: 30, recheckMs: 15 * 60_000, settleMs: 2 * 60_000, staleMs: 45 * 60_000 }
+const AUDIT = { perTick: 6, perHour: 30, recheckMs: 15 * 60_000, settleMs: 2 * 60_000, staleMs: 45 * 60_000, limitBackoffMs: 20 * 60_000 }
 
 /**
  * Subscription-only enforcement, run before any step each tick.
@@ -146,7 +146,7 @@ async function routingGuard(ports: Ports, ledger: Ledger, now: number): Promise<
 		for (const h of ledger.history) if (h.threadId && !runningThreads.has(h.threadId)) finished.set(h.threadId, { key: h.key, at: h.at })
 		const due = [...finished].filter(([t, h]) => now - h.at >= AUDIT.settleMs && (audited[t] ?? 0) < h.at + AUDIT.settleMs).sort((a, b) => b[1].at - a[1].at)
 		for (const [t, h] of due) targets.push({ label: h.key, thread: t })
-		let budget = Math.min(AUDIT.perTick, AUDIT.perHour - state.calls.length)
+		let budget = state.limitedUntil && now < state.limitedUntil ? 0 : Math.min(AUDIT.perTick, AUDIT.perHour - state.calls.length)
 		for (const target of targets) {
 			if (budget <= 0) break
 			let threads: string[]
@@ -164,8 +164,14 @@ async function routingGuard(ports: Ports, ledger: Ledger, now: number): Promise<
 				try {
 					const v = auditUsage(await routing.usage(t, t === target.thread ? target.range : undefined), verdict.allowed)
 					if (v.length) bad.push(`${t === target.thread ? '' : `child ${t}: `}${v.join('; ')}`)
-				} catch {
+				} catch (e) {
 					complete = false
+					// Rejected calls may still count against Amp's hourly limit; back off instead of retrying every tick.
+					if (/limited to \d+ requests/i.test((e as Error).message)) {
+						state.limitedUntil = now + AUDIT.limitBackoffMs
+						budget = 0
+						break
+					}
 				}
 			}
 			if (bad.length) {
