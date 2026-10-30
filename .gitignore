@@ -1,0 +1,4 @@
+node_modules/
+.amp/in/
+.amp/portals/
+*.tmp
