@@ -57,7 +57,8 @@ export function workerPrompt(cfg: Config, controllerThreadId: string, job: Job, 
 
 Expand the idea into actionable Linear issues. It is in state ${S.active} with label ${L.idea}.
 
-1. Read the idea and the repository. Check existing sub-issues of ${issue.id} first and reuse or complete them, so a retry never duplicates work.
+1. Read the idea and the repository. Check existing sub-issues of ${issue.id} first (list them with \`includeArchived: true\` too) and reuse or complete them, so a retry or an existing hand-written plan never duplicates work: keep their titles and descriptions, add any missing acceptance criteria, labels, dependencies, and test issues. If a sub-issue you need is archived, do not recreate it; the factory cannot see archived issues, so use the failure protocol with kind \`dependency\` and signature \`dependency:archived-sub-issues\`.
+   Sub-issues that only a human can complete (owner decisions, human acceptance studies, independent reviews, authorised live releases) get \`${L.hold}\` and a comment listing the evidence a human must supply. Never fabricate that evidence, and do not block engineering issues on them unless the work is genuinely impossible without them.
 2. Create one or more build issues as sub-issues of ${issue.id} (team ${cfg.team.key}, label \`${L.build}\`, state ${S.ready}). Each description has: Goal, Acceptance criteria (a checklist of observable, testable behaviour), Out of scope, and Notes with relevant files. Keep each build issue independently buildable and small; prefer one issue for a small idea.
 3. Record dependencies between build issues with blockedBy, only where one genuinely needs another's code. Independent issues build in parallel.
 4. For every build issue create one to three test issues as sub-issues of that build issue (label \`${L.test}\`, state ${S.ready}). Each says exactly what to verify and how (commands, inputs, expected results), mapped to the acceptance criteria.
